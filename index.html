@@ -806,13 +806,16 @@
             const hexOnly = /^[0-9a-fA-F]+$/.test(privateKey);
             const isHexKey = hexOnly && (privateKey.length === 64 || privateKey.length === 128);
             const isWifKey = !hexOnly && !(/^[A-Z2-7]+$/.test(privateKey)) && privateKey.length >= 51 && privateKey.length <= 52;
+            const isStellarSecret = privateKey.startsWith('S') && privateKey.length === 56 && /^[A-Z2-7]+$/.test(privateKey);
             
             // Reject if it's not a valid private key format
-            if (!isHexKey && !isWifKey) {
+            if (!isHexKey && !isWifKey && !isStellarSecret) {
                 if (/^[A-Z2-7]+$/.test(privateKey) && privateKey.length === 52) {
                     showNotification('⚠️ This looks like a transaction ID, not a private key. Private keys cannot be recovered from transaction IDs.', 'error');
+                } else if (privateKey.startsWith('G') && privateKey.length === 56) {
+                    showNotification('⚠️ This is a Stellar public address, not a secret key. Please enter the secret key (starts with S).', 'error');
                 } else {
-                    showNotification('⚠️ Invalid private key format. Please enter a valid private key', 'error');
+                    showNotification('⚠️ Invalid private key format. Please enter a valid private key (hex, WIF, or Stellar secret key starting with S)', 'error');
                 }
                 return;
             }
