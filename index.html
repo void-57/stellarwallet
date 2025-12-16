@@ -1016,7 +1016,7 @@
                     balance = accountInfo.balanceXlm;
                     
                     const balanceEl = document.getElementById('xlm-balance');
-                    balanceEl.innerHTML = balance.toFixed(6) + ' <span class="currency">xlm</span>';
+                    balanceEl.innerHTML = balance.toFixed(6) + ' <span class="currency">XLM</span>';
                     
                     txNextToken = null;
                     await loadTransactions(true);
@@ -1026,7 +1026,7 @@
                     
                     // Show 0 balance for inactive accounts
                     const balanceEl = document.getElementById('xlm-balance');
-                    balanceEl.innerHTML = '0 <span class="currency">xlm</span>';
+                    balanceEl.innerHTML = '0 <span class="currency">XLM</span>';
                     document.getElementById('tx-history').innerHTML = '<div class="tx-empty">Account is inactive or not funded yet</div>';
                 }
                 
@@ -1203,19 +1203,36 @@
                     hasMoreTransactions = true;
                 }
                 
-                // Load only one batch of transactions
+                // Load transactions - fetch one extra to check if there's more
                 if (hasMoreTransactions) {
+                    // Fetch ITEMS_PER_PAGE + 1 to check if there's a next page
                     const result = await xlmAPI.getTransactions(currentxlmAddress, {
-                        limit: 10,
+                        limit: ITEMS_PER_PAGE + 1,
                         next: txNextToken
                     });
                     
-                    allTransactions = [...allTransactions, ...result.transactions];
-                    txNextToken = result.nextToken;
-                    hasMoreTransactions = result.hasMore;
+                    // Check if we got more than ITEMS_PER_PAGE transactions
+                    const fetchedTransactions = result.transactions || [];
+                    
+                    if (fetchedTransactions.length > ITEMS_PER_PAGE) {
+                        
+                        allTransactions = [...allTransactions, ...fetchedTransactions.slice(0, ITEMS_PER_PAGE)];
+                        hasMoreTransactions = true;
+                        txNextToken = result.nextToken;
+                    } else {
+                      
+                        allTransactions = [...allTransactions, ...fetchedTransactions];
+                        hasMoreTransactions = false;
+                        txNextToken = null;
+                    }
                 }
                 
-                totalPages = Math.ceil(allTransactions.length / ITEMS_PER_PAGE);
+                // If we have no transactions at all
+                if (allTransactions.length === 0) {
+                    hasMoreTransactions = false;
+                }
+                
+                totalPages = Math.ceil(allTransactions.length / ITEMS_PER_PAGE) || 1;
                 if (hasMoreTransactions) {
                     totalPages++; // Add one more page to show "next" is available
                 }
@@ -1267,8 +1284,9 @@
             
             // Update button states
             document.getElementById('prev-page-btn').disabled = currentPage <= 1;
-            // Enable next button if we're not on last page OR if there are more transactions to load
-            document.getElementById('next-page-btn').disabled = currentPage >= totalPages && !hasMoreTransactions;
+            // Disable next button if we're on the last page AND there are no more transactions to load
+            const isLastPage = currentPage >= totalPages;
+            document.getElementById('next-page-btn').disabled = isLastPage && !hasMoreTransactions;
             
             paginationEl.style.display = filteredTransactions.length > 0 ? 'flex' : 'none';
         }
