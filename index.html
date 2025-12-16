@@ -48,13 +48,13 @@
           </a>
         </li>
         <li>
-          <a href="#" class="nav-link disabled" style="opacity: 0.5; cursor: not-allowed; pointer-events: none;">
+          <a href="#" class="nav-link" data-page="transactions">
             <i class="fas fa-history"></i>
             <span>Transactions</span>
           </a>
         </li>
         <li>
-          <a href="#" class="nav-link disabled" style="opacity: 0.5; cursor: not-allowed; pointer-events: none;">
+          <a href="#" class="nav-link" data-page="send">
             <i class="fas fa-paper-plane"></i>
             <span>Send</span>
           </a>
@@ -678,19 +678,21 @@
     <!-- required libraries -->
     <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/js-sha512@0.8.0/build/sha512.min.js"></script>
+    <!-- Stellar SDK for transaction building and signing -->
+    <script src="https://cdn.jsdelivr.net/npm/stellar-sdk@11.3.0/dist/stellar-sdk.min.js"></script>
     <script src="lib.stellar.js"></script>
     <script src="stellarCrypto.js"></script>
-    <!-- Stellar blockchain API integration - Coming soon -->
-    <!-- <script src="stellarBlockchainAPI.js"></script> -->
-    <!-- <script src="stellarSearchDB.js"></script> -->
+    <!-- Stellar blockchain API integration -->
+    <script src="stellarBlockchainAPI.js"></script>
+    <script src="stellarSearchDB.js"></script>
     
     <script>
         let currentXlmAddress = null;
         let currentXlmPrivateKey = null;
         let txNextToken = null;
         let currentSearchType = 'address';
-        // SearchDB disabled for now - will be implemented with Stellar API
-        // let searchDB = new SearchedAddressDB();
+        // SearchDB for storing recent searches
+        let searchDB = new SearchedAddressDB();
         let currentTxFilter = 'all'; // Transaction filter state
 
         function filterTransactions(type) {
@@ -941,39 +943,56 @@
             let sourceInfo = null;
             
             try {
-                // Check if input is an address (58 chars) or private key (hex/WIF format)
-                if (input.length === 58) {
-                    // It's an xlm address - validate it contains only valid base32 characters
-                    const validxlmChars = /^[A-Z2-7]+$/;
-                    if (!validxlmChars.test(input)) {
-                        showNotification('⚠️ Invalid xlm address format', 'warning');
+                // Check if input is a Stellar address (56 chars, starts with G)
+                if (input.length === 56 && input.startsWith('G')) {
+                    // It's a Stellar address - validate it contains only valid base32 characters
+                    const validStellarChars = /^[A-Z2-7]+$/;
+                    if (!validStellarChars.test(input)) {
+                        showNotification('⚠️ Invalid Stellar address format', 'warning');
                         searchBtn.disabled = false;
                         searchBtn.innerHTML = originalContent;
                         return;
                     }
                     address = input;
+                } else if (input.length === 56 && input.startsWith('S')) {
+                    // It's a Stellar secret key - derive the address
+                    const result = await stellarCrypto.generateMultiChain(input);
+                    address = result.XLM.address;
+                    sourceInfo = {
+                        privateKey: input,
+                        btcAddress: result.BTC.address,
+                        floAddress: result.FLO.address
+                    };
                 } else {
-                    // Check if it's a valid private key format
+                    // Check if it's a valid BTC/FLO private key format
                     const hexOnly = /^[0-9a-fA-F]+$/.test(input);
                     const isHexKey = hexOnly && (input.length === 64 || input.length === 128);
                     const isWifKey = !hexOnly && !(/^[A-Z2-7]+$/.test(input)) && input.length >= 51 && input.length <= 52;
                     
+                    // Check if it's a hex transaction hash (64 hex chars, all lowercase or mixed case)
+                    if (hexOnly && input.length === 64 && /[a-f]/.test(input.toLowerCase())) {
+                        showNotification('⚠️ This looks like a transaction hash. Please use "Transaction Hash" search instead', 'warning');
+                        searchBtn.disabled = false;
+                        searchBtn.innerHTML = originalContent;
+                        return;
+                    }
+                    
                     if (isHexKey || isWifKey) {
-                        // It's a private key (WIF or hex), derive the xlm address
+                        // It's a BTC/FLO private key (WIF or hex), derive the Stellar address
                         const result = await stellarCrypto.generateMultiChain(input);
-                        address = result.xlm.address;
+                        address = result.XLM.address;
                         sourceInfo = {
                             privateKey: input,
                             btcAddress: result.BTC.address,
                             floAddress: result.FLO.address
                         };
-                    } else if (/^[A-Z2-7]+$/.test(input) && input.length === 52) {
-                        showNotification('⚠️ This looks like a transaction ID. Please use "Transaction Hash" search instead', 'warning');
+                    } else if (/^[A-Z2-7]+$/.test(input) && input.length === 64) {
+                        showNotification('⚠️ This looks like a transaction hash. Please use "Transaction Hash" search instead', 'warning');
                         searchBtn.disabled = false;
                         searchBtn.innerHTML = originalContent;
                         return;
                     } else {
-                        showNotification('⚠️ Invalid format. Enter a valid xlm address (58 chars) or private key ', 'warning');
+                        showNotification('⚠️ Invalid format. Enter a valid Stellar address (56 chars, starts with G) or private key', 'warning');
                         searchBtn.disabled = false;
                         searchBtn.innerHTML = originalContent;
                         return;
@@ -988,13 +1007,33 @@
                 document.getElementById('tx-results').style.display = 'block';
                 document.getElementById('transactionFilterSection').style.display = 'block';
                 
-                await refreshxlmData();
+                // Try to fetch balance and transactions
+                let balance = 0;
+                let isInactive = false;
                 
-                // Save to database after successful balance fetch
-                const accountInfo = await xlmAPI.getBalance(address);
+                try {
+                    const accountInfo = await xlmAPI.getBalance(address);
+                    balance = accountInfo.balanceXlm;
+                    
+                    const balanceEl = document.getElementById('xlm-balance');
+                    balanceEl.innerHTML = balance.toFixed(6) + ' <span class="currency">xlm</span>';
+                    
+                    txNextToken = null;
+                    await loadTransactions(true);
+                } catch (error) {
+                    console.error('Error fetching data:', error);
+                    isInactive = true;
+                    
+                    // Show 0 balance for inactive accounts
+                    const balanceEl = document.getElementById('xlm-balance');
+                    balanceEl.innerHTML = '0 <span class="currency">xlm</span>';
+                    document.getElementById('tx-history').innerHTML = '<div class="tx-empty">Account is inactive or not funded yet</div>';
+                }
+                
+                // Save to database regardless of active/inactive status
                 await searchDB.saveSearchedAddress(
                     address,
-                    accountInfo.balancexlm,
+                    balance,
                     Date.now(),
                     sourceInfo
                 );
@@ -1032,8 +1071,8 @@
                 document.getElementById('tx-detail-id').textContent = tx.id;
                 document.getElementById('tx-detail-from').textContent = tx.sender;
                 document.getElementById('tx-detail-to').textContent = tx.receiver || '-';
-                document.getElementById('tx-detail-amount').textContent = tx.amountxlm.toFixed(6) + ' xlm';
-                document.getElementById('tx-detail-fee').textContent = (tx.fee / 1000000).toFixed(6) + ' xlm';
+                document.getElementById('tx-detail-amount').textContent = (tx.amountXlm || 0).toFixed(7) + ' XLM';
+                document.getElementById('tx-detail-fee').textContent = (tx.feeXlm || 0).toFixed(7) + ' XLM';
                 document.getElementById('tx-detail-round').textContent = tx.confirmedRound;
                 
                 const date = new Date(tx.roundTime * 1000);
@@ -1050,7 +1089,7 @@
                 
                 // Update Explorer Link
                 const explorerLink = document.getElementById('tx-explorer-link');
-                explorerLink.href = `https://allo.info/tx/${tx.id}`;
+                explorerLink.href = `https://stellar.expert/explorer/public/tx/${tx.hash}`;
                 
                 document.getElementById('txhash-results').style.display = 'block';
                 
@@ -1096,26 +1135,27 @@
             // Validate private key format
             const hexOnly = /^[0-9a-fA-F]+$/.test(privateKey);
             const isHexKey = hexOnly && (privateKey.length === 64 || privateKey.length === 128);
+            const isStellarSecret = privateKey.startsWith('S') && privateKey.length === 56 && /^[A-Z2-7]+$/.test(privateKey);
             
             // Check for WIF key (Base58: 51-52 chars, NOT Base32)
             const isBase32 = /^[A-Z2-7]+$/.test(privateKey); // Transaction IDs are Base32
             const isWifKey = !hexOnly && !isBase32 && privateKey.length >= 51 && privateKey.length <= 52;
             
-            if (!isHexKey && !isWifKey) {
+            if (!isHexKey && !isWifKey && !isStellarSecret) {
                 document.getElementById('send-wallet-info').style.display = 'none';
                 return;
             }
             
             try {
                 const result = await stellarCrypto.generateMultiChain(privateKey);
-                const address = result.xlm.address;
+                const address = result.XLM.address;
                 
                 const accountInfo = await xlmAPI.getBalance(address);
                 
             
                 const balanceEl = document.getElementById('send-balance');
-                balanceEl.innerHTML = accountInfo.balancexlm.toFixed(6) + ' <span class="currency">xlm</span>';
-                document.getElementById('send-from-address').textContent = address.substring(0, 12) + '...' + address.substring(50);
+                balanceEl.innerHTML = accountInfo.balanceXlm.toFixed(7) + ' <span class="currency">XLM</span>';
+                document.getElementById('send-from-address').textContent = address.substring(0, 12) + '...' + address.substring(address.length - 12);
                 document.getElementById('send-wallet-info').style.display = 'block';
             } catch (error) {
                 document.getElementById('send-wallet-info').style.display = 'none';
@@ -1132,7 +1172,7 @@
                 const accountInfo = await xlmAPI.getBalance(currentxlmAddress);
                 
                 const balanceEl = document.getElementById('xlm-balance');
-                balanceEl.innerHTML = accountInfo.balancexlm.toFixed(6) + ' <span class="currency">xlm</span>';
+                balanceEl.innerHTML = accountInfo.balanceXlm.toFixed(6) + ' <span class="currency">xlm</span>';
                 
                 txNextToken = null;
                 await loadTransactions(true);
@@ -1274,7 +1314,7 @@
                     <div class="tx-id" title="${tx.id}">TX ID: ${shortTxId}</div>
                 </div>
                 <div class="tx-amount ${isSent ? 'sent' : 'received'}">
-                    ${isSent ? '-' : '+'}${tx.amountxlm.toFixed(6)} xlm
+                    ${isSent ? '-' : '+'}${tx.amountXlm.toFixed(7)} XLM
                 </div>
             `;
             
@@ -1319,8 +1359,11 @@
  item.innerHTML = `
                         ${search.isFromPrivateKey ? `
                         <div class="recent-chain-buttons">
-                            <button class="chain-btn active" onclick="showAddressForChain(${search.id}, 'xlm', '${search.xlmAddress}')" title="xlm">
-                                <svg class="chain-icon-svg" viewBox="0 0 507.56 509.36" fill="currentColor"><polygon points="88.04 509.36 161.7 381.8 235.37 254.68 308.58 127.12 320.71 106.9 326.1 127.12 348.56 211.11 323.4 254.68 249.74 381.8 176.53 509.36 264.56 509.36 338.23 381.8 376.41 315.77 394.37 381.8 428.51 509.36 507.56 509.36 473.43 381.8 439.29 254.68 430.31 221.89 485.11 127.12 405.15 127.12 402.46 117.68 374.61 13.47 371.02 0 294.21 0 292.41 2.69 220.54 127.12 146.88 254.68 73.66 381.8 0 509.36 88.04 509.36"/></svg>
+                            <button class="chain-btn active" onclick="showAddressForChain(${search.id}, 'xlm', '${search.xlmAddress}')" title="XLM">
+                                <svg class="chain-icon-svg" viewBox="0 0 236.36 200" fill="currentColor">
+                                    <path d="M203,26.16l-28.46,14.5-137.43,70a82.49,82.49,0,0,1-.7-10.69A81.87,81.87,0,0,1,158.2,28.6l16.29-8.3,2.43-1.24A100,100,0,0,0,18.18,100q0,3.82.29,7.61a18.19,18.19,0,0,1-9.88,17.58L0,129.57V150l25.29-12.89,0,0,8.19-4.18,8.07-4.11v0L186.43,55l16.28-8.29,33.65-17.15V9.14Z"/>
+                                    <path d="M236.36,50,49.78,145,33.5,153.31,0,170.38v20.41l33.27-16.95,28.46-14.5L199.3,89.24A83.45,83.45,0,0,1,200,100,81.87,81.87,0,0,1,78.09,171.36l-1,.53-17.66,9A100,100,0,0,0,218.18,100c0-2.57-.1-5.14-.29-7.68a18.2,18.2,0,0,1,9.87-17.58l8.6-4.38Z"/>
+                                </svg>
                             </button>
                             <button class="chain-btn" onclick="showAddressForChain(${search.id}, 'BTC', '${search.btcAddress}')" title="BTC">
                                 <i class="fab fa-bitcoin"></i>
@@ -1475,21 +1518,24 @@
             // Validate private key format
             const hexOnly = /^[0-9a-fA-F]+$/.test(privateKey);
             const isHexKey = hexOnly && (privateKey.length === 64 || privateKey.length === 128);
+            const isStellarSecret = privateKey.startsWith('S') && privateKey.length === 56 && /^[A-Z2-7]+$/.test(privateKey);
             
             // Check for WIF key (Base58: 51-52 chars, NOT Base32)
             const isBase32 = /^[A-Z2-7]+$/.test(privateKey); // Transaction IDs are Base32
             const isWifKey = !hexOnly && !isBase32 && privateKey.length >= 51 && privateKey.length <= 52;
             
-            if (!isHexKey && !isWifKey) {
-                if (isBase32 && privateKey.length === 52) {
-                    showNotification('⚠️ This looks like a transaction ID, not a private key. Please enter a valid private key.', 'warning');
+            if (!isHexKey && !isWifKey && !isStellarSecret) {
+                if (isBase32 && privateKey.length === 64) {
+                    showNotification('⚠️ This looks like a transaction hash, not a private key. Please enter a valid private key.', 'warning');
+                } else if (privateKey.startsWith('G') && privateKey.length === 56) {
+                    showNotification('⚠️ This is a public address, not a secret key. Please enter a secret key (starts with S).', 'warning');
                 } else {
-                    showNotification('⚠️ Invalid private key format. Please enter a valid private key', 'warning');
+                    showNotification('⚠️ Invalid private key format. Please enter a valid private key (hex, WIF, or Stellar secret key)', 'warning');
                 }
                 return;
             }
-            if (!recipient || recipient.length !== 58) {
-                showNotification('⚠️ Please enter valid recipient address (58 chars)', 'warning');
+            if (!recipient || recipient.length !== 56 || !recipient.startsWith('G')) {
+                showNotification('⚠️ Please enter valid Stellar recipient address (56 chars, starts with G)', 'warning');
                 return;
             }
             if (!amount || amount <= 0) {
@@ -1504,25 +1550,25 @@
             try {
                 // Derive address from private key
                 const walletResult = await stellarCrypto.generateMultiChain(privateKey);
-                const fromAddress = walletResult.xlm.address;
-                const xlmPrivateKey = walletResult.xlm.privateKey;
+                const fromAddress = walletResult.XLM.address;
+                const xlmPrivateKey = walletResult.XLM.privateKey;
                 
                 // Get current balance
                 const accountInfo = await xlmAPI.getBalance(fromAddress);
-                const currentBalance = accountInfo.balancexlm;
-                const minBalance = accountInfo.minBalance / 1000000; // Convert microxlms to xlm
+                const currentBalance = accountInfo.balanceXlm;
+                const minBalance = accountInfo.minBalance; // Already in XLM
                 
                 // Get transaction parameters
                 const txParams = await xlmAPI.getTransactionParams();
-                const feexlm = txParams.fee / 1000000;
-                const totalxlm = amount + feexlm;
+                const feeXlm = txParams.fee / 10000000; // Convert stroops to XLM
+                const totalXlm = amount + feeXlm;
                 
                 // Calculate remaining balance after transaction
-                const remainingBalance = currentBalance - totalxlm;
+                const remainingBalance = currentBalance - totalXlm;
                 
                 // Check if balance is sufficient (must have enough for amount + fee)
-                if (totalxlm > currentBalance) {
-                    const errorMsg = `Insufficient balance! You need ${totalxlm.toFixed(6)} xlm (${amount.toFixed(6)} + ${feexlm.toFixed(6)} fee) but only have ${currentBalance.toFixed(6)} xlm available.`;
+                if (totalXlm > currentBalance) {
+                    const errorMsg = `Insufficient balance! You need ${totalXlm.toFixed(7)} XLM (${amount.toFixed(7)} + ${feeXlm.toFixed(7)} fee) but only have ${currentBalance.toFixed(7)} XLM available.`;
                     showNotification('❌ ' + errorMsg, 'error');
                     
                     // Show error in output area as well
@@ -1538,23 +1584,23 @@
                             <div class="tx-details-body">
                                 <div class="tx-detail-row">
                                     <span class="detail-label">Current Balance</span>
-                                    <span class="detail-value">${currentBalance.toFixed(6)} xlm</span>
+                                    <span class="detail-value">${currentBalance.toFixed(6)} XLM</span>
                                 </div>
                                 <div class="tx-detail-row">
                                     <span class="detail-label">Amount to Send</span>
-                                    <span class="detail-value">${amount.toFixed(6)} xlm</span>
+                                    <span class="detail-value">${amount.toFixed(6)} XLM</span>
                                 </div>
                                 <div class="tx-detail-row">
                                     <span class="detail-label">Transaction Fee</span>
-                                    <span class="detail-value fee">${feexlm.toFixed(6)} xlm</span>
+                                    <span class="detail-value fee">${feeXLM.toFixed(6)} XLM</span>
                                 </div>
                                 <div class="tx-detail-row highlight" style="color: var(--error-color);">
                                     <span class="detail-label">Total Required</span>
-                                    <span class="detail-value">${totalxlm.toFixed(6)} xlm</span>
+                                    <span class="detail-value">${totalXLM.toFixed(6)} XLM</span>
                                 </div>
                                 <div class="tx-detail-row" style="color: var(--error-color); font-weight: 600;">
                                     <span class="detail-label">Shortfall</span>
-                                    <span class="detail-value">${(totalxlm - currentBalance).toFixed(6)} xlm</span>
+                                    <span class="detail-value">${(totalXLM - currentBalance).toFixed(6)} XLM</span>
                                 </div>
                             </div>
                         </div>
@@ -1565,8 +1611,8 @@
                 
                 // Check if remaining balance meets minimum balance requirement
                 if (remainingBalance < minBalance) {
-                    const maxSendable = currentBalance - minBalance - feexlm;
-                    const errorMsg = `Transaction would leave account below minimum balance! Minimum balance required: ${minBalance.toFixed(6)} xlm. After sending ${amount.toFixed(6)} xlm + ${feexlm.toFixed(6)} fee, only ${remainingBalance.toFixed(6)} xlm would remain.`;
+                    const maxSendable = currentBalance - minBalance - feeXlm;
+                    const errorMsg = `Transaction would leave account below minimum balance! Minimum balance required: ${minBalance.toFixed(7)} XLM. After sending ${amount.toFixed(7)} XLM + ${feeXlm.toFixed(7)} fee, only ${remainingBalance.toFixed(7)} XLM would remain.`;
                     showNotification('❌ ' + errorMsg, 'error');
                     
                     // Show error in output area as well
@@ -1590,7 +1636,7 @@
                                 </div>
                                 <div class="tx-detail-row">
                                     <span class="detail-label">Transaction Fee</span>
-                                    <span class="detail-value fee">${feexlm.toFixed(6)} xlm</span>
+                                    <span class="detail-value fee">${feeXlm.toFixed(7)} XLM</span>
                                 </div>
                                 <div class="tx-detail-row highlight" style="color: var(--warning-color);">
                                     <span class="detail-label">Remaining After TX</span>
@@ -1618,8 +1664,8 @@
                     amount: amount,
                     microAmount: Math.floor(amount * 1000000),
                     fee: txParams.fee,
-                    feexlm: feexlm,
-                    total: totalxlm,
+                    feeXlm: feeXlm,
+                    total: totalXlm,
                     privateKey: xlmPrivateKey,
                     txParams: txParams
                 };
@@ -1639,9 +1685,9 @@
         function showConfirmModal() {
             document.getElementById('confirm-from').textContent = pendingTx.from.substring(0, 12) + '...' + pendingTx.from.substring(50);
             document.getElementById('confirm-to').textContent = pendingTx.to.substring(0, 12) + '...' + pendingTx.to.substring(50);
-            document.getElementById('confirm-amount').textContent = pendingTx.amount.toFixed(6) + ' xlm';
-            document.getElementById('confirm-fee').textContent = pendingTx.feexlm.toFixed(6) + ' xlm';
-            document.getElementById('confirm-total').textContent = pendingTx.total.toFixed(6) + ' xlm';
+            document.getElementById('confirm-amount').textContent = pendingTx.amount.toFixed(7) + ' XLM';
+            document.getElementById('confirm-fee').textContent = pendingTx.feeXlm.toFixed(7) + ' XLM';
+            document.getElementById('confirm-total').textContent = pendingTx.total.toFixed(7) + ' XLM';
             
             document.getElementById('confirm-modal').style.display = 'flex';
         }
@@ -1654,35 +1700,46 @@
         async function confirmAndSend() {
             if (!pendingTx) return;
             
+            // Check if Stellar SDK is initialized
+            if (!stellarAPI.isInitialized()) {
+                showNotification('❌ Stellar SDK not initialized. Attempting to initialize...', 'error');
+                const initSuccess = stellarAPI.forceInit();
+                if (!initSuccess) {
+                    showNotification('❌ Failed to initialize Stellar SDK. Please refresh the page.', 'error');
+                    closeConfirmModal();
+                    return;
+                }
+                showNotification('Stellar SDK initialized! Please try sending again.', 'success');
+                closeConfirmModal();
+                return;
+            }
+            
             const confirmBtn = document.getElementById('confirm-send-btn');
             confirmBtn.disabled = true;
             confirmBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending...';
             
             try {
-                // Build and sign the transaction
-                const signedTxBytes = await stellarCrypto.createSignedPaymentTx({
-                    from: pendingTx.from,
-                    to: pendingTx.to,
-                    amount: pendingTx.microAmount,
-                    fee: pendingTx.fee,
-                    firstRound: pendingTx.txParams.firstRound,
-                    lastRound: pendingTx.txParams.lastRound,
-                    genesisId: pendingTx.txParams.genesisId,
-                    genesisHash: pendingTx.txParams.genesisHash
-                }, pendingTx.privateKey);
+                // Build and sign the transaction using Stellar SDK
+                const signedTx = await stellarAPI.buildAndSignTransaction({
+                    sourceAddress: pendingTx.from,
+                    destinationAddress: pendingTx.to,
+                    amount: pendingTx.amount.toString(),
+                    secretKey: pendingTx.privateKey,
+                    memo: null
+                });
                 
-                // Broadcast transaction
-                const result = await xlmAPI.sendTransaction(signedTxBytes);
-                lastTxId = result.txId;
+                // Submit transaction to network
+                const result = await stellarAPI.submitTransaction(signedTx.xdr);
+                lastTxId = result.hash;
                 
                 // Save values before closing modal (closeConfirmModal sets pendingTx to null)
                 const txAmount = pendingTx.amount;
                 const txTo = pendingTx.to;
-                const txFee = pendingTx.feexlm;
+                const txFee = pendingTx.feeXlm;
                 
                 // Close confirm modal and show success
                 closeConfirmModal();
-                showSuccessModal(result.txId, txAmount, txTo, txFee);
+                showSuccessModal(result.hash, txAmount, txTo, txFee);
                 
                 // Clear all form fields
                 document.getElementById('send-privatekey').value = '';
@@ -1705,10 +1762,10 @@
         }
 
         function showSuccessModal(txId, amount, to, fee) {
-            document.getElementById('success-txid').textContent = txId;
-            document.getElementById('success-amount').textContent = amount.toFixed(6) + ' xlm';
-            document.getElementById('success-to').textContent = to.substring(0, 12) + '...' + to.substring(50);
-            document.getElementById('success-fee').textContent = fee.toFixed(6) + ' xlm';
+            document.getElementById('success-txid').textContent = txId || '-';
+            document.getElementById('success-amount').textContent = (amount ? amount.toFixed(7) : '0.0000000') + ' XLM';
+            document.getElementById('success-to').textContent = to ? (to.substring(0, 12) + '...' + to.substring(50)) : '-';
+            document.getElementById('success-fee').textContent = (fee ? fee.toFixed(7) : '0.0000100') + ' XLM';
             
             document.getElementById('success-modal').style.display = 'flex';
         }
@@ -1719,7 +1776,7 @@
 
         function viewOnExplorer() {
             if (lastTxId) {
-                window.open(`https://allo.info/tx/${lastTxId}`, '_blank');
+                window.open(`https://stellar.expert/explorer/public/tx/${lastTxId}`, '_blank');
             }
         }
 
@@ -1886,11 +1943,11 @@
         <i class="fas fa-plus-circle"></i>
         <span>Generate</span>
       </button>
-      <button class="nav-btn" data-page="transactions" disabled style="opacity: 0.5; cursor: not-allowed;">
+      <button class="nav-btn" data-page="transactions">
         <i class="fas fa-history"></i>
         <span>Transactions</span>
       </button>
-      <button class="nav-btn" data-page="send" disabled style="opacity: 0.5; cursor: not-allowed;">
+      <button class="nav-btn" data-page="send">
         <i class="fas fa-paper-plane"></i>
         <span>Send</span>
       </button>
