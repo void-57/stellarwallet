@@ -1211,17 +1211,20 @@
                         next: txNextToken
                     });
                     
-                    // Check if we got more than ITEMS_PER_PAGE transactions
+                    // Get all fetched transactions
                     const fetchedTransactions = result.transactions || [];
                     
-                    if (fetchedTransactions.length > ITEMS_PER_PAGE) {
-                        
-                        allTransactions = [...allTransactions, ...fetchedTransactions.slice(0, ITEMS_PER_PAGE)];
+                    // Add all fetched transactions to our array
+                    allTransactions = [...allTransactions, ...fetchedTransactions];
+                    
+                    // Determine if there are more transactions:
+                    // If we got exactly limit+1 transactions, there might be more
+                    // Also check the API's hasMore flag
+                    if (fetchedTransactions.length === ITEMS_PER_PAGE + 1 && result.hasMore) {
                         hasMoreTransactions = true;
                         txNextToken = result.nextToken;
                     } else {
-                      
-                        allTransactions = [...allTransactions, ...fetchedTransactions];
+                        
                         hasMoreTransactions = false;
                         txNextToken = null;
                     }
