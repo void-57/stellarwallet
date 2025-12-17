@@ -247,7 +247,9 @@
       
       // Get fee stats
       const feeStats = await server.feeStats();
-      const fee = feeStats.max_fee.mode || (StellarSdk.BASE_FEE || '100');
+      
+      // fee_charged.mode is typically 100 stroops (0.00001 XLM)
+      const fee = feeStats.fee_charged?.mode || feeStats.last_ledger_base_fee || '100';
       
       // Build transaction
       let transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
@@ -311,8 +313,8 @@
     }
     
     try {
-      // Parse the XDR back to a transaction
-      const transaction = new StellarSdk.Transaction(transactionXDR, StellarSdk.Networks.PUBLIC);
+      // Parse the XDR back to a transaction using TransactionBuilder
+      const transaction = StellarSdk.TransactionBuilder.fromXDR(transactionXDR, StellarSdk.Networks.PUBLIC);
       
       // Submit to network
       const result = await server.submitTransaction(transaction);
