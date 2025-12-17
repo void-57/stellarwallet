@@ -316,8 +316,19 @@
       // Parse the XDR back to a transaction using TransactionBuilder
       const transaction = StellarSdk.TransactionBuilder.fromXDR(transactionXDR, StellarSdk.Networks.PUBLIC);
       
+      console.log('Submitting transaction to Stellar network...');
+      
       // Submit to network
       const result = await server.submitTransaction(transaction);
+      
+      console.log('✅ Transaction submitted successfully!');
+      console.log('Transaction Details:', {
+        hash: result.hash,
+        ledger: result.ledger,
+        successful: result.successful,
+        envelope_xdr: result.envelope_xdr,
+        result_xdr: result.result_xdr
+      });
       
       return {
         hash: result.hash,
@@ -326,7 +337,7 @@
         txId: result.hash
       };
     } catch (error) {
-      console.error('Error submitting transaction:', error);
+      console.error('❌ Error submitting transaction:', error);
       
       // Parse Stellar error
       if (error.response && error.response.data) {
