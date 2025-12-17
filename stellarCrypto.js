@@ -28,6 +28,22 @@
     };
   }
 
+  // Calculate CRC16-XModem checksum (shared function)
+  function crc16XModem(data) {
+    let crc = 0x0000;
+    for (let i = 0; i < data.length; i++) {
+      crc ^= data[i] << 8;
+      for (let j = 0; j < 8; j++) {
+        if (crc & 0x8000) {
+          crc = (crc << 1) ^ 0x1021;
+        } else {
+          crc = crc << 1;
+        }
+      }
+    }
+    return crc & 0xFFFF;
+  }
+
   // --- Multi-chain Generator (BTC, FLO, XLM) ---
   stellarCrypto.generateMultiChain = async function (inputWif) {
     const versions = {
@@ -74,19 +90,35 @@
           }
           
           const decodedBytes = new Uint8Array(decoded);
-          // Extract seed (skip version byte 0x90, take 32 bytes, ignore checksum)
+          
+          // Validate checksum 
+          if (decodedBytes.length < 35) {
+            throw new Error('Invalid Stellar secret key: too short');
+          }
+          
+          // Extract components: [version(1)] + [seed(32)] + [checksum(2)]
+          const payload = decodedBytes.slice(0, 33); // version + seed
+          const providedChecksum = (decodedBytes[34] << 8) | decodedBytes[33]; // little-endian
+          
+          // Calculate expected checksum
+          const expectedChecksum = crc16XModem(payload);
+          
+          // Verify checksum matches
+          if (providedChecksum !== expectedChecksum) {
+            throw new Error(`Invalid Stellar secret key: checksum mismatch (expected ${expectedChecksum.toString(16)}, got ${providedChecksum.toString(16)})`);
+          }
+          
+          // Verify version byte
+          if (decodedBytes[0] !== 0x90) {
+            throw new Error(`Invalid Stellar secret key: wrong version byte (expected 0x90, got 0x${decodedBytes[0].toString(16)})`);
+          }
+          
+          // Extract seed (skip version byte, take 32 bytes)
           const seed = decodedBytes.slice(1, 33);
           privKeyHex = bytesToHex(seed);
         } catch (e) {
-          console.warn("Invalid Stellar secret key:", e);
-          // Fall through to generate new key
-          const newKey = generateNewID();
-          const decode = Bitcoin.Base58.decode(newKey.privKey);
-          const keyWithVersion = decode.slice(0, decode.length - 4);
-          let key = keyWithVersion.slice(1);
-          if (key.length >= 33 && key[key.length - 1] === 0x01)
-            key = key.slice(0, key.length - 1);
-          privKeyHex = bytesToHex(key);
+          console.error("Invalid Stellar secret key:", e.message);
+          throw new Error(`Failed to recover Stellar secret key: ${e.message}`);
         }
       } else if (hexOnly && (trimmedInput.length === 64 || trimmedInput.length === 128)) {
         privKeyHex =
@@ -94,6 +126,36 @@
       } else {
         try {
           const decode = Bitcoin.Base58.decode(trimmedInput);
+          
+          // Validate WIF checksum 
+          if (decode.length < 37) {
+            throw new Error('Invalid WIF key: too short');
+          }
+          
+          // WIF format: [version(1)] + [private_key(32)] + [compression_flag(0-1)] + [checksum(4)]
+          const payload = decode.slice(0, decode.length - 4);
+          const providedChecksum = decode.slice(decode.length - 4);
+          
+          // Calculate expected checksum using double SHA256
+          const hash1 = Crypto.SHA256(payload, { asBytes: true });
+          const hash2 = Crypto.SHA256(hash1, { asBytes: true });
+          const expectedChecksum = hash2.slice(0, 4);
+          
+          // Verify checksum matches
+          let checksumMatch = true;
+          for (let i = 0; i < 4; i++) {
+            if (providedChecksum[i] !== expectedChecksum[i]) {
+              checksumMatch = false;
+              break;
+            }
+          }
+          
+          if (!checksumMatch) {
+            const providedHex = providedChecksum.map(b => b.toString(16).padStart(2, '0')).join('');
+            const expectedHex = expectedChecksum.map(b => b.toString(16).padStart(2, '0')).join('');
+            throw new Error(`Invalid WIF key: checksum mismatch (expected ${expectedHex}, got ${providedHex})`);
+          }
+          
           const keyWithVersion = decode.slice(0, decode.length - 4);
           let key = keyWithVersion.slice(1);
           if (key.length >= 33 && key[key.length - 1] === 0x01) {
@@ -102,14 +164,8 @@
           }
           privKeyHex = bytesToHex(key);
         } catch (e) {
-          console.warn("Invalid WIF, generating new key:", e);
-          const newKey = generateNewID();
-          const decode = Bitcoin.Base58.decode(newKey.privKey);
-          const keyWithVersion = decode.slice(0, decode.length - 4);
-          let key = keyWithVersion.slice(1);
-          if (key.length >= 33 && key[key.length - 1] === 0x01)
-            key = key.slice(0, key.length - 1);
-          privKeyHex = bytesToHex(key);
+          console.error("Invalid WIF key:", e.message);
+          throw new Error(`Failed to recover from WIF key: ${e.message}`);
         }
       }
     } else {
@@ -152,22 +208,6 @@
       // Stellar address encoding: version byte (0x30 for public key 'G') + public key + CRC16-XModem checksum
       const versionByte = 0x30; // Results in 'G' prefix for public keys
       const payload = new Uint8Array([versionByte, ...pubKey]);
-      
-      // Calculate CRC16-XModem checksum
-      function crc16XModem(data) {
-        let crc = 0x0000;
-        for (let i = 0; i < data.length; i++) {
-          crc ^= data[i] << 8;
-          for (let j = 0; j < 8; j++) {
-            if (crc & 0x8000) {
-              crc = (crc << 1) ^ 0x1021;
-            } else {
-              crc = crc << 1;
-            }
-          }
-        }
-        return crc & 0xFFFF;
-      }
       
       const checksum = crc16XModem(payload);
       // Checksum is stored in little-endian format
